@@ -38,7 +38,6 @@ class MainActivity : FragmentActivity() {
         Request.fromSourceUrl(url)
             .build()
     }
-    private var isPrepared = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,13 +50,6 @@ class MainActivity : FragmentActivity() {
             Toast.makeText(applicationContext, "error:$what ,$extra ", Toast.LENGTH_SHORT).show()
             true
         }
-        val mediaController = MediaController(this)
-        mediaController.setMediaPlayer(videoView)
-        videoView.setMediaController(mediaController)
-
-        videoView.setOnPreparedListener {
-            isPrepared = true
-        }
         
         // 2.类似OKHttp一样发起边下边播请求
         cacheServer.newCall(playRequest) { proxyUrl ->
@@ -65,7 +57,6 @@ class MainActivity : FragmentActivity() {
             videoView.setVideoURI(Uri.parse(proxyUrl))
             videoView.start()
         }
-        
     }
 
     private fun initVideoCacheX() {
@@ -83,20 +74,9 @@ class MainActivity : FragmentActivity() {
         )
     }
 
-    override fun onResume() {
-        super.onResume()
-        videoView.resume()
-    }
-
-    override fun onPause() {
-        super.onPause()
-        videoView.pause()
-    }
-
     override fun onDestroy() {
         super.onDestroy()
-        videoView.stopPlayback()
-        cacheServer.stopRequest(playRequest, forceStopClient = true)
+        cacheServer.stopRequest(playRequest)
         cacheServer.shutdown()
     }
 }
@@ -108,8 +88,7 @@ class MainActivity : FragmentActivity() {
 VideoCacheX 采用`抽象流程`方式运作，内部提供了一个抽象流程模板（`abstract class AbsFlow`），为具体流程实现类提供好了5个方法模板: 整体流程开始、整体流程结束、每个子流程start、每个子流程结束以及子流程发生错误的回调。所以使用者根据不同场景，只需要继承AbsFlow即可，不需要额外处理工作流程事情。示例:
 
 ```kotlin
-class CustomFlow(context: Context, serverBuilder: ProxyServerBuilder, sourceUrl: String) :
-    AbsFlow(context, serverBuilder, sourceUrl) {
+class CustomFlow :  AbsFlow  {
 
     override fun onChainStart(chain: Chain) {
         // 当某个子流程启动时，会实现类会收到该回调
@@ -130,14 +109,10 @@ class CustomFlow(context: Context, serverBuilder: ProxyServerBuilder, sourceUrl:
 为了将流程中每个子流程进行解耦，我设计成责任链(`Chain`)方式，每个Chain负责单独任务并将结果传递给下一个Chain。
 
 ```kotlin
-class CustomFlow(context: Context, serverBuilder: ProxyServerBuilder, sourceUrl: String) :
-    AbsFlow(context, serverBuilder, sourceUrl) {
-
-    private val fileStoragePool =
-        FileStoragePool(fileStorage = FixedPieceFileStorage())
+class CustomFlow : AbsFlow {
 
     // 抽象流程模板提供了一套很简单的chain数据，能实现针对原始文件进行边下边播功能。但是如果涉及到有CDN调度需求时，就需要重写chain，并插入一个ExchangeUrlChain.
-    override val chain: Chain = HeadChain(context, this) // 获取原始文件的Content-Length模块
+    override val chain: Chain = HeadRequestChain(context, this) // 获取原始文件的Content-Length模块
         .next(ExchangeUrlChain(context, this)) // CDN调度切换模块
         .next(QueryFileSizeChain(context, this)) // 获取最终CDN调度后的文件Content-Length模块
         .next(DownloadFileChain(context, this, cacheDir, fileStoragePool)) // 使用CDN调度url边下边播模块
@@ -152,24 +127,9 @@ class CustomFlow(context: Context, serverBuilder: ProxyServerBuilder, sourceUrl:
 ```kotlin
 object VideoSignal {
     /**
-     * socket已被断开
-     */
-    const val SIGNAL_SOCKET_CLOSED = -1
-
-    /**
-     * 默认
-     */
-    const val SIGNAL_NOTHING = 0
-
-    /**
      *  无法获取文件基础信息，导致播放器后续无法发起socket请求
      */
     const val SIGNAL_LOST_FILE_INFO = 1
-
-    /**
-     * 调度失败，无可用的播放地址
-     */
-    const val SIGNAL_DISPATCH_FAILED = 2
 }
 // Chain
 open class Chain(...) {
@@ -189,3 +149,6 @@ abstract AbsFlow {
 ```
 
 ### 桥接模式
+
+每个Chain任务都很独立，但也会存在需要互相交互的情况。比如 `ExchangeUrlChain`和 `DownloadFileChain`。假设下载过程中突然遇到url过期了，需要重新换个CDN情况，就需要相互通信了。
+为此，我为每个`Chain`设计了一套`Bridge`方案，将各种case的具体实现放在2个chain之外，避免污染原有chain的独立逻辑。
