@@ -105,8 +105,87 @@ class MainActivity : FragmentActivity() {
 
 ### 模板方法
 
+VideoCacheX 采用`抽象流程`方式运作，内部提供了一个抽象流程模板（`abstract class AbsFlow`），为具体流程实现类提供好了5个方法模板: 整体流程开始、整体流程结束、每个子流程start、每个子流程结束以及子流程发生错误的回调。所以使用者根据不同场景，只需要继承AbsFlow即可，不需要额外处理工作流程事情。示例:
+
+```kotlin
+class CustomFlow(context: Context, serverBuilder: ProxyServerBuilder, sourceUrl: String) :
+    AbsFlow(context, serverBuilder, sourceUrl) {
+
+    override fun onChainStart(chain: Chain) {
+        // 当某个子流程启动时，会实现类会收到该回调
+    }
+
+    override fun onChainComplete(chain: Chain) {
+         // 当某个子流程完成时，会实现类会收到该回调
+    }
+
+    override fun onChainInterrupt(chain: Chain, flowExecuteListener: OnFlowExecuteListener) {
+        // 当某个子流程正常/异常中断时，会实现类会收到该回调，可以做一些错误上报、流程重试等策略
+    }
+}
+```
 
 ### 责任链模式
 
+为了将流程中每个子流程进行解耦，我设计成责任链(`Chain`)方式，每个Chain负责单独任务并将结果传递给下一个Chain。
+
+```kotlin
+class CustomFlow(context: Context, serverBuilder: ProxyServerBuilder, sourceUrl: String) :
+    AbsFlow(context, serverBuilder, sourceUrl) {
+
+    private val fileStoragePool =
+        FileStoragePool(fileStorage = FixedPieceFileStorage())
+
+    // 抽象流程模板提供了一套很简单的chain数据，能实现针对原始文件进行边下边播功能。但是如果涉及到有CDN调度需求时，就需要重写chain，并插入一个ExchangeUrlChain.
+    override val chain: Chain = HeadChain(context, this) // 获取原始文件的Content-Length模块
+        .next(ExchangeUrlChain(context, this)) // CDN调度切换模块
+        .next(QueryFileSizeChain(context, this)) // 获取最终CDN调度后的文件Content-Length模块
+        .next(DownloadFileChain(context, this, cacheDir, fileStoragePool)) // 使用CDN调度url边下边播模块
+    }
+}
+```
 
 ### 命令模式
+
+每个Chain任务很独立，但是总会遇到某个Chain要抛出错误信息来中断播放器进行播放的功能时，就需要设计一套消息机制。因此我在`Chain`类中设计一个信号量，示例:
+
+```kotlin
+object VideoSignal {
+    /**
+     * socket已被断开
+     */
+    const val SIGNAL_SOCKET_CLOSED = -1
+
+    /**
+     * 默认
+     */
+    const val SIGNAL_NOTHING = 0
+
+    /**
+     *  无法获取文件基础信息，导致播放器后续无法发起socket请求
+     */
+    const val SIGNAL_LOST_FILE_INFO = 1
+
+    /**
+     * 调度失败，无可用的播放地址
+     */
+    const val SIGNAL_DISPATCH_FAILED = 2
+}
+// Chain
+open class Chain(...) {
+    internal var signal: Int = VideoSignal.SIGNAL_NOTHING
+}
+// AbsFlow
+abstract AbsFlow {
+    override fun onChainInterrupt(chain: Chain, flowExecuteListener: OnFlowExecuteListener) {
+        when (chain.signal) {
+            VideoSignal.SIGNAL_LOST_FILE_INFO -> {
+                // 比如遇到文件404等异常，抽象流程回调就会收到signal信息，来做决策
+                flowExecuteListener.onFileReadError()
+            }
+        }
+    }
+}
+```
+
+### 桥接模式
