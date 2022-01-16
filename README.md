@@ -10,7 +10,7 @@
 2. AVC扩展性比较有限。因为AVC只负责处理将在线文件写到本地文件的事情，但是国内有多CDN的情况，如何做CDN调度切换等，在AVC中很不好植入，因为随时会影响原本的设计，容易出bug。
 3. AVC的文件存储策略不是最优。使用RandomAccessFile方式写入方式，IO频繁，不是最优解。
 
-# 通过使用方式扩展讲述VideoCacheX的特点
+# 通过example讲述VideoCacheX
 
 
 ```kotlin
